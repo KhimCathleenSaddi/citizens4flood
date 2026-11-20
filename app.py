@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import json
 
 import ee
 import pandas as pd
@@ -11,6 +12,98 @@ from gee_workflow import (
     prepare_aoi_data,
 )
 from survey_storage import save_survey_response
+
+
+def _get_secret_container(name: str):
+    try:
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
+def _get_secret_value(names: tuple[str, ...]) -> str | None:
+    for name in names:
+        try:
+            value = st.secrets.get(name)
+        except Exception:
+            value = None
+        if value:
+            return str(value)
+
+    for container_name in ("gee", "GEE", "earth_engine", "google_service_account"):
+        container = _get_secret_container(container_name)
+        if hasattr(container, "get"):
+            for name in names:
+                value = container.get(name)
+                if value:
+                    return str(value)
+    return None
+
+
+def _get_service_account_info() -> dict | None:
+    for name in ("gcp_service_account", "google_service_account", "service_account"):
+        value = _get_secret_container(name)
+        if isinstance(value, dict):
+            return dict(value)
+        if hasattr(value, "to_dict"):
+            return value.to_dict()
+
+    gee = _get_secret_container("gee")
+    if hasattr(gee, "get"):
+        value = gee.get("service_account")
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+    for name in ("gee_credentials", "GEE_CREDENTIALS", "service_account_json"):
+        try:
+            value = st.secrets.get(name)
+        except Exception:
+            value = None
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+    email = _get_secret_value(
+        ("gee_client_email", "GEE_CLIENT_EMAIL", "client_email")
+    )
+    private_key = _get_secret_value(
+        ("gee_private_key", "GEE_PRIVATE_KEY", "private_key")
+    )
+    if email and private_key:
+        return {"client_email": email, "private_key": private_key}
+    return None
+
+
+def initialize_earth_engine(project_id: str) -> None:
+    service_account = _get_service_account_info()
+    if service_account:
+        email = service_account.get("client_email")
+        private_key = service_account.get("private_key")
+        if not email or not private_key:
+            raise ValueError(
+                "The Earth Engine service-account secret requires client_email "
+                "and private_key."
+            )
+        if not project_id:
+            project_id = str(service_account.get("project_id", "")).strip()
+        credentials = ee.ServiceAccountCredentials(
+            email=email,
+            key_data=private_key.replace("\\n", "\n"),
+        )
+        ee.Initialize(credentials=credentials, project=project_id)
+    else:
+        ee.Initialize(project=project_id)
 
 
 def render_analysis() -> None:
@@ -198,12 +291,36 @@ def main() -> None:
         "about the workflow."
     )
 
+    secret_project_id = _get_secret_value(
+        (
+            "gee_project_id",
+            "GEE_PROJECT_ID",
+            "earth_engine_project_id",
+            "project_id",
+        )
+    )
+    if not secret_project_id:
+        service_account = _get_service_account_info()
+        if service_account:
+            secret_project_id = str(service_account.get("project_id", "")).strip() or None
+
     with st.sidebar:
         st.header("Google Earth Engine")
-        project_id = st.text_input("Earth Engine Cloud project ID")
+        project_id = st.text_input(
+            "Earth Engine Cloud project ID",
+            value=secret_project_id or "",
+        )
+        if secret_project_id and not st.session_state.get("gee_project_id"):
+            try:
+                initialize_earth_engine(secret_project_id)
+                st.session_state["gee_project_id"] = secret_project_id
+            except Exception as error:
+                st.session_state.pop("gee_project_id", None)
+                st.error(f"Could not initialize Earth Engine from Streamlit secrets: {error}")
+
         if st.button("Connect to Earth Engine", disabled=not project_id.strip()):
             try:
-                ee.Initialize(project=project_id.strip())
+                initialize_earth_engine(project_id.strip())
                 st.session_state["gee_project_id"] = project_id.strip()
                 st.success("Connected to Earth Engine.")
             except Exception as error:
@@ -217,11 +334,11 @@ def main() -> None:
 
         with st.expander("One-time authentication setup"):
             st.markdown(
-                "Authenticate in the same environment where Streamlit runs, then enter "
-                "the Cloud project ID above. For local user credentials, run "
-                "`earthengine authenticate` in a terminal. For a deployed app, "
-                "configure Application Default Credentials or a service account "
-                "outside the app and grant it access to Earth Engine."
+                "For Streamlit Cloud, store the project ID and service-account credentials "
+                "in Streamlit secrets. The app supports `[gcp_service_account]`, or a "
+                "`[gee]` section with `project_id`, `client_email`, and `private_key`. "
+                "For local use, run `earthengine authenticate` or configure Application "
+                "Default Credentials, then enter or store the Cloud project ID."
             )
 
     analysis_tab, survey_tab = st.tabs(["Precipitation analysis", "Survey"])
