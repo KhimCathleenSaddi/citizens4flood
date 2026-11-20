@@ -1,10 +1,9 @@
 from datetime import date, timedelta
-import json
 
-import ee
 import pandas as pd
 import streamlit as st
 
+from gee_auth import init_ee
 from gee_workflow import (
     PRECIPITATION_DATASETS,
     fetch_precipitation,
@@ -12,98 +11,6 @@ from gee_workflow import (
     prepare_aoi_data,
 )
 from survey_storage import save_survey_response
-
-
-def _get_secret_container(name: str):
-    try:
-        return st.secrets.get(name)
-    except Exception:
-        return None
-
-
-def _get_secret_value(names: tuple[str, ...]) -> str | None:
-    for name in names:
-        try:
-            value = st.secrets.get(name)
-        except Exception:
-            value = None
-        if value:
-            return str(value)
-
-    for container_name in ("gee", "GEE", "earth_engine", "google_service_account"):
-        container = _get_secret_container(container_name)
-        if hasattr(container, "get"):
-            for name in names:
-                value = container.get(name)
-                if value:
-                    return str(value)
-    return None
-
-
-def _get_service_account_info() -> dict | None:
-    for name in ("gcp_service_account", "google_service_account", "service_account"):
-        value = _get_secret_container(name)
-        if isinstance(value, dict):
-            return dict(value)
-        if hasattr(value, "to_dict"):
-            return value.to_dict()
-
-    gee = _get_secret_container("gee")
-    if hasattr(gee, "get"):
-        value = gee.get("service_account")
-        if isinstance(value, dict):
-            return dict(value)
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-
-    for name in ("gee_credentials", "GEE_CREDENTIALS", "service_account_json"):
-        try:
-            value = st.secrets.get(name)
-        except Exception:
-            value = None
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-
-    email = _get_secret_value(
-        ("gee_client_email", "GEE_CLIENT_EMAIL", "client_email")
-    )
-    private_key = _get_secret_value(
-        ("gee_private_key", "GEE_PRIVATE_KEY", "private_key")
-    )
-    if email and private_key:
-        return {"client_email": email, "private_key": private_key}
-    return None
-
-
-def initialize_earth_engine(project_id: str) -> None:
-    service_account = _get_service_account_info()
-    if service_account:
-        email = service_account.get("client_email")
-        private_key = service_account.get("private_key")
-        if not email or not private_key:
-            raise ValueError(
-                "The Earth Engine service-account secret requires client_email "
-                "and private_key."
-            )
-        if not project_id:
-            project_id = str(service_account.get("project_id", "")).strip()
-        credentials = ee.ServiceAccountCredentials(
-            email=email,
-            key_data=private_key.replace("\\n", "\n"),
-        )
-        ee.Initialize(credentials=credentials, project=project_id)
-    else:
-        ee.Initialize(project=project_id)
 
 
 def render_analysis() -> None:
@@ -135,11 +42,11 @@ def render_analysis() -> None:
     timescale = st.selectbox("Timescale", tuple(PRECIPITATION_DATASETS))
     default_days = PRECIPITATION_DATASETS[timescale]["default_days"]
     today = date.today()
-    end_date = st.date_input("End date (exclusive)", value=today + timedelta(days=1))
     start_date = st.date_input(
         "Start date (inclusive)",
         value=today - timedelta(days=default_days - 1),
     )
+    end_date = st.date_input("End date (exclusive)", value=today + timedelta(days=1))
 
     if st.button("Load AOIs"):
         try:
@@ -159,11 +66,27 @@ def render_analysis() -> None:
                 "AOI names or coordinates."
             )
         st.dataframe(aoi_data, use_container_width=True)
-        selected_aois = st.multiselect(
-            "AOIs to query",
-            options=aoi_data["AOI"].tolist(),
-            default=aoi_data["AOI"].tolist(),
-        )
+        if {"City", "Point_ID"}.issubset(aoi_data.columns):
+            city_options = aoi_data["City"].dropna().astype(str).unique().tolist()
+            if city_options:
+                selected_city = st.selectbox("City", options=city_options)
+                city_data = aoi_data[aoi_data["City"].astype(str) == selected_city]
+                point_options = city_data["Point_ID"].dropna().unique().tolist()
+                selected_point_ids = st.multiselect(
+                    "Point IDs",
+                    options=point_options,
+                    default=point_options,
+                )
+                selected_data = city_data[city_data["Point_ID"].isin(selected_point_ids)]
+            else:
+                selected_data = aoi_data.iloc[0:0]
+        else:
+            selected_aois = st.multiselect(
+                "AOIs to query",
+                options=aoi_data["AOI"].tolist(),
+                default=aoi_data["AOI"].tolist(),
+            )
+            selected_data = aoi_data[aoi_data["AOI"].isin(selected_aois)]
 
         if st.button("Run precipitation query", type="primary"):
             project_id = st.session_state.get("gee_project_id")
@@ -171,10 +94,9 @@ def render_analysis() -> None:
                 st.error("Connect to an Earth Engine project in the sidebar before querying.")
             elif start_date >= end_date:
                 st.error("The start date must be earlier than the exclusive end date.")
-            elif not selected_aois:
-                st.error("Select at least one AOI.")
+            elif selected_data.empty:
+                st.error("Select at least one point or AOI.")
             else:
-                selected_data = aoi_data[aoi_data["AOI"].isin(selected_aois)]
                 all_results = []
                 errors = []
                 progress = st.progress(0)
@@ -285,60 +207,29 @@ def render_survey() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="River Plastic Detection", page_icon="🌧️", layout="wide")
+    try:
+        init_ee()
+    except Exception as error:
+        st.error(f"Could not initialize Earth Engine: {error}")
+        st.stop()
+
+    project_id = str(st.secrets["earthengine"]["project_id"]).strip()
+    st.session_state["gee_project_id"] = project_id
+
     st.title("River Plastic Detection")
     st.write(
         "Explore ERA5-Land precipitation for areas of interest and share feedback "
         "about the workflow."
     )
 
-    secret_project_id = _get_secret_value(
-        (
-            "gee_project_id",
-            "GEE_PROJECT_ID",
-            "earth_engine_project_id",
-            "project_id",
-        )
-    )
-    if not secret_project_id:
-        service_account = _get_service_account_info()
-        if service_account:
-            secret_project_id = str(service_account.get("project_id", "")).strip() or None
-
     with st.sidebar:
         st.header("Google Earth Engine")
-        project_id = st.text_input(
-            "Earth Engine Cloud project ID",
-            value=secret_project_id or "",
-        )
-        if secret_project_id and not st.session_state.get("gee_project_id"):
-            try:
-                initialize_earth_engine(secret_project_id)
-                st.session_state["gee_project_id"] = secret_project_id
-            except Exception as error:
-                st.session_state.pop("gee_project_id", None)
-                st.error(f"Could not initialize Earth Engine from Streamlit secrets: {error}")
-
-        if st.button("Connect to Earth Engine", disabled=not project_id.strip()):
-            try:
-                initialize_earth_engine(project_id.strip())
-                st.session_state["gee_project_id"] = project_id.strip()
-                st.success("Connected to Earth Engine.")
-            except Exception as error:
-                st.session_state.pop("gee_project_id", None)
-                st.error(f"Could not initialize Earth Engine: {error}")
-
-        if st.session_state.get("gee_project_id") == project_id.strip() and project_id.strip():
-            st.caption(f"Connected project: {project_id.strip()}")
-        else:
-            st.info("Connect before running a precipitation query.")
+        st.success(f"Connected project: {project_id}")
 
         with st.expander("One-time authentication setup"):
             st.markdown(
-                "For Streamlit Cloud, store the project ID and service-account credentials "
-                "in Streamlit secrets. The app supports `[gcp_service_account]`, or a "
-                "`[gee]` section with `project_id`, `client_email`, and `private_key`. "
-                "For local use, run `earthengine authenticate` or configure Application "
-                "Default Credentials, then enter or store the Cloud project ID."
+                "Add the Earth Engine Cloud project ID and service-account credentials "
+                "to Streamlit secrets under `[earthengine]` before starting the app."
             )
 
     analysis_tab, survey_tab = st.tabs(["Precipitation analysis", "Survey"])
