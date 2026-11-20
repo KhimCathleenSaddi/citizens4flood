@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -14,16 +15,18 @@ from survey_storage import save_survey_response
 
 
 def render_analysis() -> None:
-    st.header("AOI data")
+    st.header("Define the Area-of-Interest")
     data_source = st.radio(
         "Choose an AOI source",
-        ("Google Sheet", "Upload CSV"),
+        ("Sample points CSV", "Google Sheet", "Upload CSV"),
         horizontal=True,
     )
     uploaded_file = None
     sheet_id = ""
     sheet_name = "Sarno_Events"
-    if data_source == "Google Sheet":
+    if data_source == "Sample points CSV":
+        st.caption("Use the included Manila, Bangkok, and Santiago sample points.")
+    elif data_source == "Google Sheet":
         sheet_id = st.text_input(
             "Google Sheet URL or ID",
             value="1sMJMJD3xOFdhyi2du6cyQdkJ6mooFLCmcsyu6_IAt_o",
@@ -38,27 +41,35 @@ def render_analysis() -> None:
         "`Event_Number` is optional."
     )
 
-    st.header("Precipitation query")
-    timescale = st.selectbox("Timescale", tuple(PRECIPITATION_DATASETS))
-    default_days = PRECIPITATION_DATASETS[timescale]["default_days"]
-    today = date.today()
-    start_date = st.date_input(
-        "Start date (inclusive)",
-        value=today - timedelta(days=default_days - 1),
-    )
-    end_date = st.date_input("End date (exclusive)", value=today + timedelta(days=1))
-
-    if st.button("Load AOIs"):
+    if data_source == "Sample points CSV":
+        try:
+            csv_path = Path(__file__).with_name("hypothetical_points.csv")
+            raw_data = pd.read_csv(csv_path)
+            aoi_data, skipped = prepare_aoi_data(raw_data)
+            st.session_state["aoi_data"] = aoi_data
+            st.session_state["aoi_skipped"] = skipped
+            st.session_state["aoi_source"] = data_source
+        except Exception as error:
+            st.session_state.pop("aoi_data", None)
+            st.session_state.pop("aoi_source", None)
+            st.error(f"Could not load AOIs: {error}")
+    elif st.button("Load AOIs"):
         try:
             raw_data = load_aoi_data(uploaded_file, sheet_id, sheet_name)
             aoi_data, skipped = prepare_aoi_data(raw_data)
             st.session_state["aoi_data"] = aoi_data
             st.session_state["aoi_skipped"] = skipped
+            st.session_state["aoi_source"] = data_source
         except Exception as error:
             st.session_state.pop("aoi_data", None)
+            st.session_state.pop("aoi_source", None)
             st.error(f"Could not load AOIs: {error}")
 
-    aoi_data = st.session_state.get("aoi_data")
+    aoi_data = (
+        st.session_state.get("aoi_data")
+        if st.session_state.get("aoi_source") == data_source
+        else None
+    )
     if aoi_data is not None:
         if st.session_state.get("aoi_skipped", 0):
             st.warning(
@@ -69,15 +80,25 @@ def render_analysis() -> None:
         if {"City", "Point_ID"}.issubset(aoi_data.columns):
             city_options = aoi_data["City"].dropna().astype(str).unique().tolist()
             if city_options:
-                selected_city = st.selectbox("City", options=city_options)
+                selected_city = st.selectbox("1. City", options=city_options)
                 city_data = aoi_data[aoi_data["City"].astype(str) == selected_city]
                 point_options = city_data["Point_ID"].dropna().unique().tolist()
-                selected_point_ids = st.multiselect(
-                    "Point IDs",
-                    options=point_options,
-                    default=point_options,
-                )
-                selected_data = city_data[city_data["Point_ID"].isin(selected_point_ids)]
+                if point_options:
+                    selected_point_id = st.selectbox(
+                        "2. Point ID",
+                        options=point_options,
+                    )
+                    selected_data = city_data[
+                        city_data["Point_ID"] == selected_point_id
+                    ]
+                    selected_point = selected_data.iloc[0]
+                    st.write(
+                        "Selected coordinates: "
+                        f"latitude: {selected_point['Center_LAT']}, "
+                        f"longitude: {selected_point['Center_LONG']}"
+                    )
+                else:
+                    selected_data = aoi_data.iloc[0:0]
             else:
                 selected_data = aoi_data.iloc[0:0]
         else:
@@ -87,6 +108,16 @@ def render_analysis() -> None:
                 default=aoi_data["AOI"].tolist(),
             )
             selected_data = aoi_data[aoi_data["AOI"].isin(selected_aois)]
+
+        st.header("Precipitation query")
+        timescale = st.selectbox("Timescale", tuple(PRECIPITATION_DATASETS))
+        default_days = PRECIPITATION_DATASETS[timescale]["default_days"]
+        today = date.today()
+        start_date = st.date_input(
+            "Start date (inclusive)",
+            value=today - timedelta(days=default_days - 1),
+        )
+        end_date = st.date_input("End date (exclusive)", value=today + timedelta(days=1))
 
         if st.button("Run precipitation query", type="primary"):
             project_id = st.session_state.get("gee_project_id")

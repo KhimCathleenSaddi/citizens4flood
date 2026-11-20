@@ -20,12 +20,14 @@ Earth Engine and includes a feedback survey whose responses are saved in SQLite.
    Engine is initialized when the app starts; if initialization fails, the app
    displays the error and stops.
 3. Start the app with `streamlit run app.py`.
-4. Load AOIs from a publicly readable Google Sheet or upload a CSV. The input must
-   contain `AOI`, `Center_LONG`, and `Center_LAT` columns; `Event_Number` is optional.
-   When both `City` and `Point_ID` columns are present, choose a city first and then
-   one or more point IDs. The included
-   [hypothetical Manila points CSV](./manila_hypothetical_points.csv) provides ten
-   sample locations for this flow.
+4. Define the Area-of-Interest by loading the included
+   [hypothetical points CSV](./hypothetical_points.csv) with 10 sample points each
+   for Manila, Bangkok, and Santiago (Chile), or load AOIs from a publicly readable
+   Google Sheet or upload a CSV. The input must contain `AOI`, `Center_LONG`, and
+   `Center_LAT` columns; `Event_Number` is optional.
+   For data with `City` and `Point_ID` columns, choose a city and then a point ID.
+   The selected point's latitude and longitude are shown from the CSV and included
+   in each precipitation query result.
 5. Choose a timescale and date window, select AOIs, and run the query. Results can
    be viewed as a chart and downloaded as CSV.
 6. Collect workflow feedback in the Survey tab. Responses are saved to

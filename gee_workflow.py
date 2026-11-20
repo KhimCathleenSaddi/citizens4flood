@@ -118,6 +118,8 @@ def fetch_precipitation(
                 "precipitation": properties["precipitation"],
                 "AOI": aoi_row["AOI"],
                 "Event_Number": aoi_row.get("Event_Number", None),
+                "Center_LAT": aoi_row["Center_LAT"],
+                "Center_LONG": aoi_row["Center_LONG"],
             }
         )
     return pd.DataFrame(rows)
